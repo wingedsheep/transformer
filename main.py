@@ -237,26 +237,21 @@ class DecoderLayer(torch.nn.Module):
         feed_forward_output = self.feed_forward(normalized_residual_output)
 
         # Dropout
-        feed_forward_output = self.dropout(feed_forward_output)
+        if self.training:
+            feed_forward_output = self.dropout(feed_forward_output)
 
         # Residual output
         return residual_output + feed_forward_output
 
 
-class Decoder(torch.nn.Module):
+class DecoderStack(torch.nn.Module):
     """
-    Pytorch module for the decoder.
-
-    The decoder consists of a token embedding layer, a positional encoding layer, and a stack of encoder layers.
-
-    Input dimension is: (batch_size, sequence_length)
-    Output dimension is: (batch_size, sequence_length, embedding_dimension)
+    The decoder stack consists of multiple decoder layers in sequence.
     """
 
     def __init__(
             self,
             embedding_dimension,
-            number_of_tokens,
             number_of_layers,
             number_of_heads,
             feed_forward_dimension,
@@ -265,19 +260,11 @@ class Decoder(torch.nn.Module):
     ):
         super().__init__()
         self.embedding_dimension = embedding_dimension
-        self.number_of_tokens = number_of_tokens
         self.number_of_layers = number_of_layers
         self.number_of_heads = number_of_heads
         self.feed_forward_dimension = feed_forward_dimension
         self.dropout_rate = dropout_rate
         self.max_sequence_length = max_sequence_length
-        self.layer_normalization = torch.nn.LayerNorm(embedding_dimension)
-
-        # Create the token embedding layer
-        self.token_embedding = TokenEmbedding(embedding_dimension, number_of_tokens)
-
-        # Create the positional encoding layer
-        self.positional_encoding = PositionalEncoding(embedding_dimension, max_sequence_length)
 
         # Create the encoder layers
         self.encoder_layers = torch.nn.ModuleList(
@@ -285,27 +272,7 @@ class Decoder(torch.nn.Module):
              range(number_of_layers)])
 
     def forward(self, x, mask):
-        """
-        Compute the decoder.
-
-        x dimensions are: (batch_size, sequence_length)
-        mask dimensions are: (batch_size, sequence_length)
-        mask values are: 0 or 1. 0 means the token is masked, 1 means the token is not masked.
-        """
-        # Compute the token embeddings
-        # token_embeddings dimensions are: (batch_size, sequence_length, embedding_dimension)
-        token_embeddings = self.token_embedding(x)
-
-        # Compute the positional encoding
-        # positional_encoding dimensions are: (batch_size, sequence_length, embedding_dimension)
-        positional_encoding = self.positional_encoding(token_embeddings)
-
-        # Post embedding layer normalization
-        positional_encoding_normalized = self.layer_normalization(positional_encoding)
-
-        # Compute the encoder layers
-        # decoder_outputs dimensions are: (batch_size, sequence_length, embedding_dimension)
-        decoder_outputs = positional_encoding_normalized
+        decoder_outputs = x
         for decoder_layer in self.encoder_layers:
             decoder_outputs = decoder_layer(decoder_outputs, mask)
 
@@ -315,8 +282,7 @@ class Decoder(torch.nn.Module):
 class LMHead(torch.nn.Module):
     """
     Pytorch module for the language model head.
-
-    The language model head is a linear layer that is applied to the output of the decoder.
+    The language model head is a linear layer that maps the embedding dimension to the vocabulary size.
     """
 
     def __init__(self, embedding_dimension, number_of_tokens):
@@ -330,6 +296,7 @@ class LMHead(torch.nn.Module):
         Compute the language model head.
 
         x dimensions are: (batch_size, sequence_length, embedding_dimension)
+        output dimensions are: (batch_size, sequence_length, number_of_tokens)
         """
         # Compute the linear layer
         # linear_output dimensions are: (batch_size, sequence_length, number_of_tokens)
@@ -338,9 +305,9 @@ class LMHead(torch.nn.Module):
         return linear_output
 
 
-class GPT(torch.nn.Module):
+class LanguageModel(torch.nn.Module):
     """
-    Pytorch module for an autoregressive GPT model.
+    Pytorch module for a language model.
     """
 
     def __init__(
@@ -368,46 +335,41 @@ class GPT(torch.nn.Module):
 
         self.dropout_rate = dropout_rate
 
-        # Create the decoder
-        self.decoder = Decoder(
-            embedding_dimension,
-            number_of_tokens,
-            number_of_layers,
-            number_of_heads,
-            feed_forward_dimension,
-            dropout_rate,
-            max_sequence_length
+        # Create the token embedding layer
+        self.token_embedding = TokenEmbedding(embedding_dimension, number_of_tokens)
+
+        # Create the positional encoding layer
+        self.positional_encoding = PositionalEncoding(embedding_dimension, max_sequence_length)
+
+        # Create the normalization layer
+        self.layer_normalization = torch.nn.LayerNorm(embedding_dimension)
+
+        # Create the decoder stack
+        self.decoder = DecoderStack(
+            embedding_dimension=embedding_dimension,
+            number_of_layers=number_of_layers,
+            number_of_heads=number_of_heads,
+            feed_forward_dimension=feed_forward_dimension,
+            dropout_rate=dropout_rate,
+            max_sequence_length=max_sequence_length
         )
 
         # Create the language model head
         self.lm_head = LMHead(embedding_dimension, number_of_tokens)
 
-        # Initialize the weights of the network
-        self.init_weights()
-
-    def init_weights(self):
-        """
-        Initialize the weights of the network.
-        """
-        for p in self.parameters():
-            # GPT-2 paper uses normal distribution with mean 0 and standard deviation 0.02
-            if p.dim() > 1:
-                torch.nn.init.xavier_uniform_(p)
-
     def forward(self, x, mask):
-        """
-        Compute the GPT model.
+        # Compute the token embeddings
+        # token_embeddings dimensions are: (batch_size, sequence_length, embedding_dimension)
+        token_embeddings = self.token_embedding(x)
 
-        x dimensions are: (batch_size, sequence_length)
-        mask dimensions are: (batch_size, sequence_length)
-        mask values are: 0 or 1. 0 means the token is masked, 1 means the token is not masked.
-        """
-        # Compute the decoder
-        # decoder_outputs dimensions are: (batch_size, sequence_length, embedding_dimension)
-        decoder_outputs = self.decoder(x, mask)
+        # Compute the positional encoding
+        # positional_encoding dimensions are: (batch_size, sequence_length, embedding_dimension)
+        positional_encoding = self.positional_encoding(token_embeddings)
 
-        # Compute the language model head
-        # lm_head_outputs dimensions are: (batch_size, sequence_length, number_of_tokens)
+        # Post embedding layer normalization
+        positional_encoding_normalized = self.layer_normalization(positional_encoding)
+
+        decoder_outputs = self.decoder(positional_encoding_normalized, mask)
         lm_head_outputs = self.lm_head(decoder_outputs)
 
         return lm_head_outputs
@@ -416,8 +378,6 @@ class GPT(torch.nn.Module):
 class AutoregressiveWrapper(torch.nn.Module):
     """
     Pytorch module that wraps a GPT model and makes it autoregressive.
-
-    The GPT model is autoregressive because the output of the model is used as the input of the model.
     """
 
     def __init__(self, gpt_model):
@@ -441,11 +401,14 @@ class AutoregressiveWrapper(torch.nn.Module):
         """
         logits = self.model(x, mask)[:, -1]
 
+        # Apply temperature
         if temperature != 1.0:
             logits = logits / temperature
 
-        probs = torch.softmax(logits, dim=-1)
-        return probs
+        # Apply the softmax
+        probabilities = torch.softmax(logits, dim=-1)
+
+        return probabilities
 
 
 class Tokenizer:
@@ -535,6 +498,7 @@ class Trainer:
                 # Compute the losses
                 # The loss is computed on the model output and the target
                 loss = self.loss_function(model_output.transpose(1, 2), target)
+                # loss = self.loss_function(model_output[:, -1, :], target[:, -1])
 
                 # Backpropagate the loss.
                 loss.backward()
@@ -650,16 +614,16 @@ class Runner(torch.nn.Module):
         # Create the tokenizer
         tokenizer = Tokenizer()
 
-        embedding_dimension = 128
+        embedding_dimension = 256
         max_sequence_length = 20
         number_of_tokens = tokenizer.size()
 
         # Create the model
-        model = AutoregressiveWrapper(GPT(
+        model = AutoregressiveWrapper(LanguageModel(
             embedding_dimension=embedding_dimension,
             number_of_tokens=number_of_tokens,
-            number_of_heads=6,
-            number_of_layers=4,
+            number_of_heads=4,
+            number_of_layers=3,
             dropout_rate=0.1,
             max_sequence_length=max_sequence_length
         ))
@@ -681,14 +645,13 @@ class Runner(torch.nn.Module):
             'polar bears are white'
         ])
 
-        tokenized_and_padded_training_data = tokenize_and_pad_training_data(max_sequence_length, tokenizer,
-                                                                            training_data)
+        tokenized_and_padded_training_data = tokenize_and_pad_training_data(max_sequence_length, tokenizer, training_data)
         sequences = create_training_sequences(max_sequence_length, tokenized_and_padded_training_data)
 
         # Train the model
         optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
         trainer = Trainer(model, tokenizer, optimizer)
-        trainer.train(sequences, epochs=300, batch_size=4)
+        trainer.train(sequences, epochs=100, batch_size=8)
 
         # Generate text
         max_tokens_to_generate = 50
@@ -696,9 +659,9 @@ class Runner(torch.nn.Module):
         generated_text = generator.generate(
             max_tokens_to_generate=max_tokens_to_generate,
             prompt="elephants",
-            padding_token=0
+            padding_token=tokenizer.character_to_token('<pad>')
         )
-        print("generated text", generated_text)
+        print(generated_text.replace('<pad>', ''))
 
 
 def pad_left(sequence, final_length, padding_token):
