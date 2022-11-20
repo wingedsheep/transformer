@@ -18,7 +18,10 @@ class TokenEmbedding(torch.nn.Module):
             number_of_tokens
     ):
         super().__init__()
-        self.embedding_layer = torch.nn.Embedding(number_of_tokens, embedding_dimension)
+        self.embedding_layer = torch.nn.Embedding(
+            num_embeddings=number_of_tokens,
+            embedding_dim=embedding_dimension
+        )
 
     def forward(self, x):
         return self.embedding_layer(x)
@@ -80,6 +83,7 @@ class MaskedSelfAttention(torch.nn.Module):
 
         x dimension is: (batch_size, sequence_length, embedding_dimension)
         output dimension is: (batch_size, sequence_length, head_dimension)
+        mask dimension is: (batch_size, sequence_length)
 
         mask values are: 0 or 1. 0 means the token is masked, 1 means the token is not masked.
         """
@@ -92,11 +96,15 @@ class MaskedSelfAttention(torch.nn.Module):
 
         # Calculate the attention weights.
         # attention_weights dimensions are: (batch_size, sequence_length, sequence_length)
-        attention_weights = torch.matmul(query, key.transpose(-2, -1)) / np.sqrt(self.head_dimension)
+        attention_weights = torch.matmul(query, key.transpose(-2, -1))
 
-        # Apply the mask to the attention weights. Set the masked values to a large negative value when the mask is 0.
-        if mask is not None:
-            attention_weights = attention_weights.masked_fill(mask == 0, -1e9)
+        # Scale the attention weights.
+        attention_weights = attention_weights / np.sqrt(self.head_dimension)
+
+        # Apply the mask to the attention weights, by setting the masked tokens to a very low value.
+        # This will make the softmax output 0 for these values.
+        mask = mask.reshape(attention_weights.shape[0], 1, attention_weights.shape[2])
+        attention_weights = attention_weights.masked_fill(mask == 0, -1e9)
 
         # Softmax makes sure all scores are between 0 and 1 and the sum of scores is 1.
         # attention_scores dimensions are: (batch_size, sequence_length, sequence_length)
@@ -339,22 +347,28 @@ class GPT(torch.nn.Module):
 
     def __init__(
             self,
-            embedding_dimension,
-            number_of_tokens,
-            number_of_layers,
-            number_of_heads,
-            feed_forward_dimension,
-            dropout_rate,
-            max_sequence_length
+            number_of_tokens,  # The number of tokens in the vocabulary
+            max_sequence_length=512,  # The maximum sequence length to use for attention
+            embedding_dimension=512,  # The dimension of the token embeddings
+            number_of_layers=6,  # The number of decoder layers to use
+            number_of_heads=4,  # The number of attention heads to use
+            feed_forward_dimension=None,  # The dimension of the feed forward layer
+            dropout_rate=0.1  # The dropout rate to use
     ):
         super().__init__()
-        self.embedding_dimension = embedding_dimension
         self.number_of_tokens = number_of_tokens
+        self.max_sequence_length = max_sequence_length
+        self.embedding_dimension = embedding_dimension
         self.number_of_layers = number_of_layers
         self.number_of_heads = number_of_heads
-        self.feed_forward_dimension = feed_forward_dimension
+
+        if feed_forward_dimension is None:
+            # GPT-2 paper uses 4 * embedding_dimension for the feed forward dimension
+            feed_forward_dimension = embedding_dimension * 4
+        else:
+            self.feed_forward_dimension = feed_forward_dimension
+
         self.dropout_rate = dropout_rate
-        self.max_sequence_length = max_sequence_length
 
         # Create the decoder
         self.decoder = GptDecoder(
@@ -416,7 +430,7 @@ class AutoregressiveWrapper(torch.nn.Module):
         Autoregressive forward pass
         """
         inp, target = x[:, :-1], x[:, 1:]
-        mask = mask[:, 1:]
+        mask = mask[:, :-1]
 
         output = self.model(inp, mask)
         return output, target
@@ -462,62 +476,38 @@ class AutoregressiveWrapper(torch.nn.Module):
 class Tokenizer:
 
     def __init__(self):
-        self.dictionary = {
-            '<PAD>': 0,
-            '<BOS>': 1,
-            '<EOS>': 2,
-            'a': 3,
-            'b': 4,
-            'c': 5,
-            'd': 6,
-            'e': 7,
-            'f': 8,
-            'g': 9,
-            'h': 10,
-            'i': 11,
-            'j': 12,
-            'k': 13,
-            'l': 14,
-            'm': 15,
-            'n': 16,
-            'o': 17,
-            'p': 18,
-            'q': 19,
-            'r': 20,
-            's': 21,
-            't': 22,
-            'u': 23,
-            'v': 24,
-            'w': 25,
-            'x': 26,
-            'y': 27,
-            'z': 28,
-            ' ': 29,
-            '1': 30,
-            '2': 31,
-            '3': 32,
-            '4': 33,
-            '5': 34,
-            '6': 35,
-            '7': 36,
-            '8': 37,
-            '9': 38,
-            '0': 39
-        }
-        self.reverse_dictionary = {v: k for k, v in self.dictionary.items()}
+        self.dictionary = {}
+        self.reverse_dictionary = {}
+
+        # Add the padding token
+        self.__add_to_dict('<pad>')
+
+        # Add characters and numbers to the dictionary
+        for i in range(10):
+            self.__add_to_dict(str(i))
+        for i in range(26):
+            self.__add_to_dict(chr(ord('a') + i))
+
+        # Add space and punctuation to the dictionary
+        self.__add_to_dict('.')
+        self.__add_to_dict(' ')
+
+    def __add_to_dict(self, character):
+        if character not in self.dictionary:
+            self.dictionary[character] = len(self.dictionary)
+            self.reverse_dictionary[self.dictionary[character]] = character
 
     def tokenize(self, text):
-        tokens = []
-        for character in text:
-            if character in self.dictionary:
-                tokens.append(self.dictionary[character])
-        return tokens
+        return [self.dictionary[c] for c in text]
 
     def character_to_token(self, character):
         return self.dictionary[character]
 
     def token_to_character(self, token):
         return self.reverse_dictionary[token]
+
+    def size(self):
+        return len(self.dictionary)
 
 
 class Runner(torch.nn.Module):
@@ -526,19 +516,19 @@ class Runner(torch.nn.Module):
         super().__init__()
 
     def run(self):
-        embedding_dimension = 128
-        feed_forward_dimension = 256
-        max_sequence_length = 20
-        number_of_tokens = 40
-
         # Create the tokenizer
         tokenizer = Tokenizer()
+
+        embedding_dimension = 128
+        feed_forward_dimension = 512
+        max_sequence_length = 20
+        number_of_tokens = tokenizer.size()
 
         # Create the model
         model = AutoregressiveWrapper(GPT(
             embedding_dimension=embedding_dimension,
             number_of_tokens=number_of_tokens,
-            number_of_heads=4,
+            number_of_heads=6,
             number_of_layers=3,
             feed_forward_dimension=feed_forward_dimension,
             dropout_rate=0.1,
@@ -548,7 +538,7 @@ class Runner(torch.nn.Module):
         # Create the optimizer
         optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 
-        # Create the loss function
+        # Create the loss function for batched training
         loss_function = torch.nn.CrossEntropyLoss()
 
         # Create the training data
@@ -573,7 +563,7 @@ class Runner(torch.nn.Module):
 
         for _ in range(max_sequence_length):
             # Prepend padding tokens
-            tokenized_training_data.insert(0, tokenizer.character_to_token('<PAD>'))
+            tokenized_training_data.insert(0, tokenizer.character_to_token('<pad>'))
 
         # Create sequences of length max_sequence_length + 1
         # The last token of each sequence is the target token
@@ -582,48 +572,60 @@ class Runner(torch.nn.Module):
             sequences.append(tokenized_training_data[i: i + max_sequence_length + 1])
 
         # Train the model
-        batch_size = 1
+        batch_size = 4
         for epoch in range(200):
             losses = []
 
             # Shuffle the sequences
             random.shuffle(sequences)
 
-            # Create batches of sequences
+            # Create batches of sequences and their respective mask.
             batches = []
             for i in range(0, len(sequences), batch_size):
-                batches.append(sequences[i: i + batch_size])
+                sequence_tensor = torch.tensor(sequences[i: i + batch_size], dtype=torch.long)
+
+                # Create the mask tensor for the batch, where 1 means the token is not a padding token
+                mask_tensor = torch.ones_like(sequence_tensor)
+                mask_tensor[sequence_tensor == tokenizer.character_to_token('<pad>')] = 0
+
+                batches.append((sequence_tensor, mask_tensor))
 
             # Train the model on each batch
             for batch in batches:
                 model.train()
 
-                # Create the input and target tensors
+                # Create the input and mask tensors
                 input_tensor = torch.zeros((batch_size, max_sequence_length + 1), dtype=torch.long)
+                mask_tensor = torch.zeros((batch_size, max_sequence_length + 1), dtype=torch.long)
 
-                for i, sequence in enumerate(batch):
-                    input_tensor[i] = torch.tensor(sequence)
+                for i, input_entry in enumerate(batch[0]):
+                    input_tensor[i] = input_entry
 
-                # Create the mask tensor
-                mask_tensor = torch.ones((batch_size, max_sequence_length + 1), dtype=torch.long)
+                for i, mask_entry in enumerate(batch[1]):
+                    mask_tensor[i] = mask_entry
 
                 # Compute the model output
-                model_output, target = model.forward(input_tensor, mask_tensor)
+                model_output, target = model.forward(x=input_tensor, mask=mask_tensor)
 
-                # Compute the loss
-                loss = loss_function(model_output.view(-1, number_of_tokens), target.view(-1))
+                # Compute the losses
+                # The loss is computed on the model output and the target
+                # The target is the last token of each sequence
+                loss = loss_function(model_output.transpose(1, 2), target)
 
+                # Backpropagate the loss.
                 loss.backward()
 
-                # Clip the gradients
+                # Clip the gradients. This is used to prevent exploding gradients.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
-                # Backpropagate the loss
+                # Update the model parameters. This is done by taking a step in the direction of the gradient.
                 optimizer.step()
 
-                # Reset the gradients
+                # Reset the gradients. This is done so that the gradients from the previous batch
+                # are not used in the next step.
                 optimizer.zero_grad()
 
+                # Append the loss to the list of losses, so that the average loss can be computed for this epoch.
                 losses.append(loss.item())
 
             # Print the loss
@@ -632,7 +634,8 @@ class Runner(torch.nn.Module):
         # Generate some text
         model.eval()
         tokens_to_generate = 50
-        input_tensor = torch.tensor(pad_left(tokenizer.tokenize("elephants"), 21, tokenizer.character_to_token('<PAD>')), dtype=torch.long)
+        input_tensor = torch.tensor(
+            pad_left(tokenizer.tokenize("elephants"), 21, tokenizer.character_to_token('<pad>')), dtype=torch.long)
 
         generated_text = model.generate(start_tokens=input_tensor, seq_len=tokens_to_generate, eos_token=None)
         generated_text = generated_text[0].tolist()
