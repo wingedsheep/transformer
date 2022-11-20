@@ -1,4 +1,5 @@
 import random
+from typing import List
 
 import torch
 import numpy as np
@@ -392,6 +393,7 @@ class GPT(torch.nn.Module):
         Initialize the weights of the network.
         """
         for p in self.parameters():
+            # GPT-2 paper uses normal distribution with mean 0 and standard deviation 0.02
             if p.dim() > 1:
                 torch.nn.init.xavier_uniform_(p)
 
@@ -424,6 +426,7 @@ class AutoregressiveWrapper(torch.nn.Module):
     def __init__(self, gpt_model):
         super().__init__()
         self.model = gpt_model
+        self.max_sequence_length = self.model.max_sequence_length
 
     def forward(self, x, mask):
         """
@@ -435,7 +438,7 @@ class AutoregressiveWrapper(torch.nn.Module):
         output = self.model(inp, mask)
         return output, target
 
-    def generate(self, start_tokens, seq_len, temperature=1.0, eos_token=None, pad_value=0):
+    def generate(self, start_tokens, max_tokens_to_generate, temperature=1.0, eos_token=None, pad_value=0):
         """
         Generate text with the GPT model.
         """
@@ -448,7 +451,7 @@ class AutoregressiveWrapper(torch.nn.Module):
 
         out = start_tokens
 
-        for _ in range(seq_len):
+        for _ in range(max_tokens_to_generate):
             x = out[:, -self.model.max_sequence_length:]
 
             mask = torch.ones_like(x)
@@ -510,6 +513,139 @@ class Tokenizer:
         return len(self.dictionary)
 
 
+class Trainer:
+
+    def __init__(self, model, tokenizer: Tokenizer, optimizer=None):
+        super().__init__()
+        self.model = model
+        if optimizer is None:
+            self.optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+        else:
+            self.optimizer = optimizer
+        self.tokenizer = tokenizer
+        self.loss_function = torch.nn.CrossEntropyLoss()
+
+    def train(self, data: List[str], epochs, batch_size):
+        for epoch in range(epochs):
+            losses = []
+
+            # Shuffle the sequences
+            random.shuffle(data)
+
+            # Create batches of sequences and their respective mask.
+            batches = []
+            for i in range(0, len(data), batch_size):
+                sequence_tensor = torch.tensor(data[i: i + batch_size], dtype=torch.long)
+
+                # Create the mask tensor for the batch, where 1 means the token is not a padding token
+                mask_tensor = torch.ones_like(sequence_tensor)
+                mask_tensor[sequence_tensor == self.tokenizer.character_to_token('<pad>')] = 0
+
+                batches.append((sequence_tensor, mask_tensor))
+
+            # Train the model on each batch
+            for batch in batches:
+                self.model.train()
+
+                # Create the input and mask tensors
+                input_tensor = torch.zeros((batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
+                mask_tensor = torch.zeros((batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
+
+                for i, input_entry in enumerate(batch[0]):
+                    input_tensor[i] = input_entry
+
+                for i, mask_entry in enumerate(batch[1]):
+                    mask_tensor[i] = mask_entry
+
+                # Compute the model output
+                model_output, target = self.model.forward(x=input_tensor, mask=mask_tensor)
+
+                # Compute the losses
+                # The loss is computed on the model output and the target
+                loss = self.loss_function(model_output.transpose(1, 2), target)
+
+                # Backpropagate the loss.
+                loss.backward()
+
+                # Clip the gradients. This is used to prevent exploding gradients.
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+
+                # Update the model parameters. This is done by taking a step in the direction of the gradient.
+                self.optimizer.step()
+
+                # Reset the gradients. This is done so that the gradients from the previous batch
+                # are not used in the next step.
+                self.optimizer.zero_grad()
+
+                # Append the loss to the list of losses, so that the average loss can be computed for this epoch.
+                losses.append(loss.item())
+
+            # Print the loss
+            print('Epoch:', epoch, 'Loss:', np.average(losses))
+
+
+class Generator:
+
+    def __init__(
+            self,
+            model,
+            tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+
+    def generate(
+            self,
+            max_tokens_to_generate: int,
+            prompt: str = None,
+            temperature: float = 1.0,
+            eos_token: int = None,
+            padding_token: int = 0):
+
+        self.model.eval()
+
+        if prompt is None:
+            start_tokens = [self.tokenizer.character_to_token(padding_token)]
+        else:
+            start_tokens = self.tokenizer.tokenize(prompt)
+
+        input_tensor = torch.tensor(
+            pad_left(
+                sequence=start_tokens,
+                final_length=self.model.max_sequence_length + 1,
+                padding_token=padding_token
+            ),
+            dtype=torch.long
+        )
+
+        generated_tokens = self.model.generate(
+            start_tokens=input_tensor,
+            max_tokens_to_generate=max_tokens_to_generate,
+            temperature=temperature,
+            eos_token=eos_token,
+            pad_value=padding_token
+        )
+        generated_tokens = generated_tokens[0].tolist()
+        return ''.join([self.tokenizer.token_to_character(token) for token in generated_tokens])
+
+
+def create_training_sequences(max_sequence_length, tokenized_training_data):
+    # Create sequences of length max_sequence_length + 1
+    # The last token of each sequence is the target token
+    sequences = []
+    for i in range(0, len(tokenized_training_data) - max_sequence_length - 1):
+        sequences.append(tokenized_training_data[i: i + max_sequence_length + 1])
+    return sequences
+
+
+def tokenize_and_pad_training_data(max_sequence_length, tokenizer, training_data):
+    # Tokenize the training data
+    tokenized_training_data = tokenizer.tokenize(training_data)
+    for _ in range(max_sequence_length):
+        # Prepend padding tokens
+        tokenized_training_data.insert(0, tokenizer.character_to_token('<pad>'))
+    return tokenized_training_data
+
+
 class Runner(torch.nn.Module):
 
     def __init__(self):
@@ -520,7 +656,6 @@ class Runner(torch.nn.Module):
         tokenizer = Tokenizer()
 
         embedding_dimension = 128
-        feed_forward_dimension = 512
         max_sequence_length = 20
         number_of_tokens = tokenizer.size()
 
@@ -528,18 +663,11 @@ class Runner(torch.nn.Module):
         model = AutoregressiveWrapper(GPT(
             embedding_dimension=embedding_dimension,
             number_of_tokens=number_of_tokens,
-            number_of_heads=6,
+            number_of_heads=4,
             number_of_layers=3,
-            feed_forward_dimension=feed_forward_dimension,
             dropout_rate=0.1,
             max_sequence_length=max_sequence_length
         ))
-
-        # Create the optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-
-        # Create the loss function for batched training
-        loss_function = torch.nn.CrossEntropyLoss()
 
         # Create the training data
         training_data = '. '.join([
@@ -558,88 +686,24 @@ class Runner(torch.nn.Module):
             'polar bears are white'
         ])
 
-        # Tokenize the training data
-        tokenized_training_data = tokenizer.tokenize(training_data)
-
-        for _ in range(max_sequence_length):
-            # Prepend padding tokens
-            tokenized_training_data.insert(0, tokenizer.character_to_token('<pad>'))
-
-        # Create sequences of length max_sequence_length + 1
-        # The last token of each sequence is the target token
-        sequences = []
-        for i in range(0, len(tokenized_training_data) - max_sequence_length - 1):
-            sequences.append(tokenized_training_data[i: i + max_sequence_length + 1])
+        tokenized_and_padded_training_data = tokenize_and_pad_training_data(max_sequence_length, tokenizer,
+                                                                            training_data)
+        sequences = create_training_sequences(max_sequence_length, tokenized_and_padded_training_data)
 
         # Train the model
-        batch_size = 4
-        for epoch in range(200):
-            losses = []
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+        trainer = Trainer(model, tokenizer, optimizer)
+        trainer.train(sequences, epochs=200, batch_size=4)
 
-            # Shuffle the sequences
-            random.shuffle(sequences)
-
-            # Create batches of sequences and their respective mask.
-            batches = []
-            for i in range(0, len(sequences), batch_size):
-                sequence_tensor = torch.tensor(sequences[i: i + batch_size], dtype=torch.long)
-
-                # Create the mask tensor for the batch, where 1 means the token is not a padding token
-                mask_tensor = torch.ones_like(sequence_tensor)
-                mask_tensor[sequence_tensor == tokenizer.character_to_token('<pad>')] = 0
-
-                batches.append((sequence_tensor, mask_tensor))
-
-            # Train the model on each batch
-            for batch in batches:
-                model.train()
-
-                # Create the input and mask tensors
-                input_tensor = torch.zeros((batch_size, max_sequence_length + 1), dtype=torch.long)
-                mask_tensor = torch.zeros((batch_size, max_sequence_length + 1), dtype=torch.long)
-
-                for i, input_entry in enumerate(batch[0]):
-                    input_tensor[i] = input_entry
-
-                for i, mask_entry in enumerate(batch[1]):
-                    mask_tensor[i] = mask_entry
-
-                # Compute the model output
-                model_output, target = model.forward(x=input_tensor, mask=mask_tensor)
-
-                # Compute the losses
-                # The loss is computed on the model output and the target
-                # The target is the last token of each sequence
-                loss = loss_function(model_output.transpose(1, 2), target)
-
-                # Backpropagate the loss.
-                loss.backward()
-
-                # Clip the gradients. This is used to prevent exploding gradients.
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-
-                # Update the model parameters. This is done by taking a step in the direction of the gradient.
-                optimizer.step()
-
-                # Reset the gradients. This is done so that the gradients from the previous batch
-                # are not used in the next step.
-                optimizer.zero_grad()
-
-                # Append the loss to the list of losses, so that the average loss can be computed for this epoch.
-                losses.append(loss.item())
-
-            # Print the loss
-            print('Epoch:', epoch, 'Loss:', np.average(losses))
-
-        # Generate some text
-        model.eval()
-        tokens_to_generate = 50
-        input_tensor = torch.tensor(
-            pad_left(tokenizer.tokenize("elephants"), 21, tokenizer.character_to_token('<pad>')), dtype=torch.long)
-
-        generated_text = model.generate(start_tokens=input_tensor, seq_len=tokens_to_generate, eos_token=None)
-        generated_text = generated_text[0].tolist()
-        print('Generated text:', ''.join([tokenizer.token_to_character(token) for token in generated_text]))
+        # Generate text
+        max_tokens_to_generate = 50
+        generator = Generator(model, tokenizer)
+        generated_text = generator.generate(
+            max_tokens_to_generate=max_tokens_to_generate,
+            prompt="elephants",
+            padding_token=0
+        )
+        print("generated text", generated_text)
 
 
 def pad_left(sequence, final_length, padding_token):
