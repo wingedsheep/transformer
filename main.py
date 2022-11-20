@@ -304,12 +304,12 @@ class Decoder(torch.nn.Module):
         positional_encoding_normalized = self.layer_normalization(positional_encoding)
 
         # Compute the encoder layers
-        # encoder_outputs dimensions are: (batch_size, sequence_length, embedding_dimension)
-        encoder_outputs = positional_encoding_normalized
-        for encoder_layer in self.encoder_layers:
-            encoder_outputs = encoder_layer(encoder_outputs, mask)
+        # decoder_outputs dimensions are: (batch_size, sequence_length, embedding_dimension)
+        decoder_outputs = positional_encoding_normalized
+        for decoder_layer in self.encoder_layers:
+            decoder_outputs = decoder_layer(decoder_outputs, mask)
 
-        return encoder_outputs
+        return decoder_outputs
 
 
 class LMHead(torch.nn.Module):
@@ -435,42 +435,17 @@ class AutoregressiveWrapper(torch.nn.Module):
         output = self.model(inp, mask)
         return output, target
 
-    def generate(self, start_tokens, max_tokens_to_generate, temperature=1.0, eos_token=None, pad_value=0):
+    def next_token_probabilities(self, x, mask, temperature=1.0):
         """
-        Generate text with the GPT model.
+        Calculate the token probabilities for the next token in the sequence.
         """
-        self.model.eval()
+        logits = self.model(x, mask)[:, -1]
 
-        num_dims = len(start_tokens.shape)
+        if temperature != 1.0:
+            logits = logits / temperature
 
-        if num_dims == 1:
-            start_tokens = start_tokens[None, :]
-
-        out = start_tokens
-
-        for _ in range(max_tokens_to_generate):
-            x = out[:, -self.model.max_sequence_length:]
-
-            mask = torch.ones_like(x)
-
-            # Mask padding tokens
-            mask[x == pad_value] = 0
-
-            logits = self.model(x, mask)[:, -1]
-
-            if temperature != 1.0:
-                logits = logits / temperature
-
-            probs = torch.softmax(logits, dim=-1)
-
-            next_token = torch.multinomial(probs, num_samples=1)
-
-            out = torch.cat([out, next_token], dim=1)
-
-            if eos_token is not None and next_token == eos_token:
-                break
-
-        return out
+        probs = torch.softmax(logits, dim=-1)
+        return probs
 
 
 class Tokenizer:
@@ -614,14 +589,37 @@ class Generator:
             dtype=torch.long
         )
 
-        generated_tokens = self.model.generate(
-            start_tokens=input_tensor,
-            max_tokens_to_generate=max_tokens_to_generate,
-            temperature=temperature,
-            eos_token=eos_token,
-            pad_value=padding_token
-        )
-        generated_tokens = generated_tokens[0].tolist()
+        num_dims = len(input_tensor.shape)
+
+        if num_dims == 1:
+            input_tensor = input_tensor[None, :]
+
+        out = input_tensor
+        for _ in range(max_tokens_to_generate):
+
+            x = out[:, -self.model.max_sequence_length:]
+
+            mask = torch.ones_like(x)
+            mask[x == padding_token] = 0
+
+            # Compute the next token probabilities
+            next_token_probabilities = self.model.next_token_probabilities(
+                x=x,
+                temperature=temperature,
+                mask=mask
+            )
+
+            # Sample the next token from the probability distribution
+            next_token = torch.multinomial(next_token_probabilities, num_samples=1)
+
+            # Append the next token to the output
+            out = torch.cat([out, next_token], dim=1)
+
+            # If the end of sequence token is reached, stop generating tokens
+            if eos_token is not None and next_token == eos_token:
+                break
+
+        generated_tokens = out[0].tolist()
         return ''.join([self.tokenizer.token_to_character(token) for token in generated_tokens])
 
 
@@ -660,8 +658,8 @@ class Runner(torch.nn.Module):
         model = AutoregressiveWrapper(GPT(
             embedding_dimension=embedding_dimension,
             number_of_tokens=number_of_tokens,
-            number_of_heads=4,
-            number_of_layers=3,
+            number_of_heads=6,
+            number_of_layers=4,
             dropout_rate=0.1,
             max_sequence_length=max_sequence_length
         ))
@@ -690,7 +688,7 @@ class Runner(torch.nn.Module):
         # Train the model
         optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
         trainer = Trainer(model, tokenizer, optimizer)
-        trainer.train(sequences, epochs=100, batch_size=4)
+        trainer.train(sequences, epochs=300, batch_size=4)
 
         # Generate text
         max_tokens_to_generate = 50
