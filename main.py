@@ -4,6 +4,8 @@ from typing import List
 import torch
 import numpy as np
 
+import matplotlib.pyplot as plt
+
 
 class TokenEmbedding(torch.nn.Module):
     """
@@ -329,7 +331,7 @@ class LanguageModel(torch.nn.Module):
 
         if feed_forward_dimension is None:
             # GPT-2 paper uses 4 * embedding_dimension for the feed forward dimension
-            feed_forward_dimension = embedding_dimension * 4
+            self.feed_forward_dimension = embedding_dimension * 4
         else:
             self.feed_forward_dimension = feed_forward_dimension
 
@@ -349,7 +351,7 @@ class LanguageModel(torch.nn.Module):
             embedding_dimension=embedding_dimension,
             number_of_layers=number_of_layers,
             number_of_heads=number_of_heads,
-            feed_forward_dimension=feed_forward_dimension,
+            feed_forward_dimension=self.feed_forward_dimension,
             dropout_rate=dropout_rate,
             max_sequence_length=max_sequence_length
         )
@@ -373,6 +375,34 @@ class LanguageModel(torch.nn.Module):
         lm_head_outputs = self.lm_head(decoder_outputs)
 
         return lm_head_outputs
+
+    def save_checkpoint(self, path):
+        print(f'Saving checkpoint {path}')
+        torch.save({
+            'number_of_tokens': self.number_of_tokens,
+            'max_sequence_length': self.max_sequence_length,
+            'embedding_dimension': self.embedding_dimension,
+            'number_of_layers': self.number_of_layers,
+            'number_of_heads': self.number_of_heads,
+            'feed_forward_dimension': self.feed_forward_dimension,
+            'dropout_rate': self.dropout_rate,
+            'model_state_dict': self.state_dict()
+        }, path)
+
+    @staticmethod
+    def load_checkpoint(path) -> 'LanguageModel':
+        checkpoint = torch.load(path)
+        model = LanguageModel(
+            number_of_tokens=checkpoint['number_of_tokens'],
+            max_sequence_length=checkpoint['max_sequence_length'],
+            embedding_dimension=checkpoint['embedding_dimension'],
+            number_of_layers=checkpoint['number_of_layers'],
+            number_of_heads=checkpoint['number_of_heads'],
+            feed_forward_dimension=checkpoint['feed_forward_dimension'],
+            dropout_rate=checkpoint['dropout_rate']
+        )
+        model.load_state_dict(checkpoint['model_state_dict'])
+        return model.to(get_device())
 
 
 class AutoregressiveWrapper(torch.nn.Module):
@@ -409,6 +439,14 @@ class AutoregressiveWrapper(torch.nn.Module):
         probabilities = torch.softmax(logits, dim=-1)
 
         return probabilities
+
+    def save_checkpoint(self, path):
+        self.model.save_checkpoint(path)
+
+    @staticmethod
+    def load_checkpoint(path) -> 'AutoregressiveWrapper':
+        model = LanguageModel.load_checkpoint(path)
+        return AutoregressiveWrapper(model).to(get_device())
 
 
 class Tokenizer:
@@ -448,6 +486,13 @@ class Tokenizer:
         return len(self.dictionary)
 
 
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    else:
+        return torch.device('cpu')
+
+
 class Trainer:
 
     def __init__(self, model, tokenizer: Tokenizer, optimizer=None):
@@ -461,6 +506,7 @@ class Trainer:
         self.loss_function = torch.nn.CrossEntropyLoss()
 
     def train(self, data: List[str], epochs, batch_size):
+        loss_per_epoch = []
         for epoch in range(epochs):
             losses = []
 
@@ -493,7 +539,10 @@ class Trainer:
                     mask_tensor[i] = mask_entry
 
                 # Compute the model output
-                model_output, target = self.model.forward(x=input_tensor, mask=mask_tensor)
+                model_output, target = self.model.forward(
+                    x=input_tensor.to(get_device()),
+                    mask=mask_tensor.to(get_device())
+                )
 
                 # Compute the losses
                 # The loss is computed on the model output and the target
@@ -517,7 +566,11 @@ class Trainer:
                 losses.append(loss.item())
 
             # Print the loss
-            print('Epoch:', epoch, 'Loss:', np.average(losses))
+            epoch_loss = np.average(losses)
+            loss_per_epoch.append(epoch_loss)
+            print('Epoch:', epoch, 'Loss:', epoch_loss)
+
+        return loss_per_epoch
 
 
 class Generator:
@@ -551,7 +604,7 @@ class Generator:
                 padding_token=padding_token
             ),
             dtype=torch.long
-        )
+        ).to(get_device())
 
         num_dims = len(input_tensor.shape)
 
@@ -626,7 +679,7 @@ class Runner(torch.nn.Module):
             number_of_layers=3,
             dropout_rate=0.1,
             max_sequence_length=max_sequence_length
-        ))
+        )).to(get_device())
 
         # Create the training data
         training_data = '. '.join([
@@ -651,7 +704,16 @@ class Runner(torch.nn.Module):
         # Train the model
         optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
         trainer = Trainer(model, tokenizer, optimizer)
-        trainer.train(sequences, epochs=100, batch_size=8)
+        loss_per_epoch = trainer.train(sequences, epochs=50, batch_size=8)
+
+        # Plot the loss per epoch in log scale
+        plt.plot(loss_per_epoch)
+        plt.yscale('log')
+        plt.ylabel('Loss')
+        plt.xlabel('Epoch')
+        plt.show()
+
+        model.save_checkpoint('./trained_model')
 
         # Generate text
         max_tokens_to_generate = 50
