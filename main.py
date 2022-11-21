@@ -53,7 +53,7 @@ class PositionalEncoding(torch.nn.Module):
             for i in range(0, self.embedding_dimension, 2):
                 positional_encoding[pos, i] = np.sin(pos / (10000 ** ((2 * i) / self.embedding_dimension)))
                 positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** ((2 * (i + 1)) / self.embedding_dimension)))
-        return torch.from_numpy(positional_encoding).float()
+        return torch.from_numpy(positional_encoding).float().to(get_device())
 
     def forward(self, x):
         """
