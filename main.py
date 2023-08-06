@@ -32,33 +32,44 @@ class TokenEmbedding(torch.nn.Module):
 
 class PositionalEncoding(torch.nn.Module):
     """
-    Pytorch module that creates a positional embedding with the same dimensions as the token embeddings.
-
-    Input dimension is: (batch_size, sequence_length, embedding_dimension)
-    Output dimension is: (batch_size, sequence_length, embedding_dimension)
+    Pytorch module that creates a positional encoding matrix. This matrix will later be added to the
+    transformer's input embeddings to provide a sense of position of the sequence elements.
     """
 
-    def __init__(self, embedding_dimension, max_sequence_length):
+    def __init__(self, d_model, max_sequence_length):
         super().__init__()
-        self.embedding_dimension = embedding_dimension
+        self.d_model = d_model
         self.max_sequence_length = max_sequence_length
         self.positional_encoding = self.create_positional_encoding()
 
     def create_positional_encoding(self):
         """
-        Creates a positional encoding matrix of size (max_sequence_length, embedding_dimension)
+        Creates a positional encoding matrix of size (max_sequence_length, d_model).
         """
-        positional_encoding = np.zeros((self.max_sequence_length, self.embedding_dimension))
+
+        # Initialize positional encoding matrix
+        positional_encoding = np.zeros((self.max_sequence_length, self.d_model))
+
+        # Calculate positional encoding for each position and each dimension
         for pos in range(self.max_sequence_length):
-            for i in range(0, self.embedding_dimension, 2):
-                positional_encoding[pos, i] = np.sin(pos / (10000 ** ((2 * i) / self.embedding_dimension)))
-                positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** ((2 * (i + 1)) / self.embedding_dimension)))
-        return torch.from_numpy(positional_encoding).float().to(get_device())
+            for i in range(0, self.d_model, 2):
+                # Apply sin to even indices in the array; indices in Python start at 0 so i is even.
+                positional_encoding[pos, i] = np.sin(pos / (10000 ** ((2 * i) / self.d_model)))
+
+                if i + 1 < self.d_model:
+                    # Apply cos to odd indices in the array; we add 1 to i because indices in Python start at 0.
+                    positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** ((2 * i) / self.d_model)))
+
+        # Convert numpy array to PyTorch tensor and return it
+        return torch.from_numpy(positional_encoding).float()
 
     def forward(self, x):
         """
-        Adds the positional encoding to the token embeddings.
+        Adds the positional encoding to the input embeddings at the corresponding positions.
         """
+        # Add positional encodings to input embeddings. The ":" indexing ensures we only add positional encodings up
+        # to the length of the sequence in the batch. x.size(0) is the batch size, so this is a way to make sure
+        # we're not adding extra positional encodings.
         return x + self.positional_encoding[:x.size(1), :]
 
 
@@ -701,7 +712,7 @@ class Runner(torch.nn.Module):
         # Train the model
         optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
         trainer = Trainer(model, tokenizer, optimizer)
-        loss_per_epoch = trainer.train(sequences, epochs=50, batch_size=8)
+        loss_per_epoch = trainer.train(sequences, epochs=120, batch_size=16)
 
         # Plot the loss per epoch in log scale
         plt.plot(loss_per_epoch)
@@ -713,11 +724,11 @@ class Runner(torch.nn.Module):
         model.save_checkpoint('./trained_model')
 
         # Generate text
-        max_tokens_to_generate = 50
+        max_tokens_to_generate = 400
         generator = Generator(model, tokenizer)
         generated_text = generator.generate(
             max_tokens_to_generate=max_tokens_to_generate,
-            prompt="elephants",
+            prompt="cats",
             padding_token=tokenizer.character_to_token('<pad>')
         )
         print(generated_text.replace('<pad>', ''))
