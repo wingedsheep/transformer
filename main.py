@@ -57,7 +57,7 @@ class PositionalEncoding(torch.nn.Module):
                     positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** ((2 * i) / self.d_model)))
 
         # Convert numpy array to PyTorch tensor and return it
-        return torch.from_numpy(positional_encoding).float()
+        return torch.from_numpy(positional_encoding).float().to(get_device())
 
     def forward(self, x):
         """
