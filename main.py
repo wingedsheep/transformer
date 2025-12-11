@@ -542,8 +542,9 @@ class Trainer:
                 self.model.train()
 
                 # Create the input and mask tensors
-                input_tensor = torch.zeros((batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
-                mask_tensor = torch.zeros((batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
+                actual_batch_size = len(batch[0])
+                input_tensor = torch.zeros((actual_batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
+                mask_tensor = torch.zeros((actual_batch_size, self.model.max_sequence_length + 1), dtype=torch.long)
 
                 for i, input_entry in enumerate(batch[0]):
                     input_tensor[i] = input_entry
@@ -608,7 +609,8 @@ class Generator:
 
         self.model.eval()
 
-        if prompt is None:
+        with torch.no_grad():
+            if prompt is None:
             start_tokens = [self.tokenizer.character_to_token(padding_token)]
         else:
             start_tokens = self.tokenizer.tokenize(prompt)
