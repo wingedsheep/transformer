@@ -94,11 +94,11 @@ class PositionalEncoding(torch.nn.Module):
         for pos in range(self.max_sequence_length):
             for i in range(0, self.d_model, 2):
                 # Apply sin to even indices in the array; indices in Python start at 0 so i is even.
-                positional_encoding[pos, i] = np.sin(pos / (10000 ** ((2 * i) / self.d_model)))
+                positional_encoding[pos, i] = np.sin(pos / (10000 ** (i / self.d_model)))
 
                 if i + 1 < self.d_model:
                     # Apply cos to odd indices in the array; we add 1 to i because indices in Python start at 0.
-                    positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** ((2 * i) / self.d_model)))
+                    positional_encoding[pos, i + 1] = np.cos(pos / (10000 ** (i / self.d_model)))
 
         # Convert numpy array to PyTorch tensor and return it
         return torch.from_numpy(positional_encoding).float()
